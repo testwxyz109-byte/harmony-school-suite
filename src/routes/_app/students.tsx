@@ -244,7 +244,7 @@ function StudentModal({ open, onClose, onSaved, student, classes, programs, batc
     };
     const { error } = student
       ? await supabase.from("students").update(payload).eq("id", student.id)
-      : await supabase.from("students").insert(payload);
+      : await supabase.from("students").insert([payload]);
     setSaving(false);
     if (error) return toast.error(error.message);
     toast.success(student ? "Student updated" : "Student created");
