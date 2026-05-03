@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SignupRouteImport } from './routes/signup'
+import { Route as ResultsRouteImport } from './routes/results'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
@@ -31,6 +32,11 @@ import { Route as AppAcademicRouteImport } from './routes/_app/academic'
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
   path: '/signup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResultsRoute = ResultsRouteImport.update({
+  id: '/results',
+  path: '/results',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -121,6 +127,7 @@ const AppAcademicRoute = AppAcademicRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/results': typeof ResultsRoute
   '/signup': typeof SignupRoute
   '/academic': typeof AppAcademicRoute
   '/announcements': typeof AppAnnouncementsRoute
@@ -140,6 +147,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/results': typeof ResultsRoute
   '/signup': typeof SignupRoute
   '/academic': typeof AppAcademicRoute
   '/announcements': typeof AppAnnouncementsRoute
@@ -161,6 +169,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
+  '/results': typeof ResultsRoute
   '/signup': typeof SignupRoute
   '/_app/academic': typeof AppAcademicRoute
   '/_app/announcements': typeof AppAnnouncementsRoute
@@ -182,6 +191,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/results'
     | '/signup'
     | '/academic'
     | '/announcements'
@@ -201,6 +211,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/login'
+    | '/results'
     | '/signup'
     | '/academic'
     | '/announcements'
@@ -221,6 +232,7 @@ export interface FileRouteTypes {
     | '/'
     | '/_app'
     | '/login'
+    | '/results'
     | '/signup'
     | '/_app/academic'
     | '/_app/announcements'
@@ -242,6 +254,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AppRoute: typeof AppRouteWithChildren
   LoginRoute: typeof LoginRoute
+  ResultsRoute: typeof ResultsRoute
   SignupRoute: typeof SignupRoute
 }
 
@@ -252,6 +265,13 @@ declare module '@tanstack/react-router' {
       path: '/signup'
       fullPath: '/signup'
       preLoaderRoute: typeof SignupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/results': {
+      id: '/results'
+      path: '/results'
+      fullPath: '/results'
+      preLoaderRoute: typeof ResultsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -416,6 +436,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AppRoute: AppRouteWithChildren,
   LoginRoute: LoginRoute,
+  ResultsRoute: ResultsRoute,
   SignupRoute: SignupRoute,
 }
 export const routeTree = rootRouteImport
