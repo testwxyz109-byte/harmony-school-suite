@@ -1,175 +1,174 @@
-# Migration Plan: Supabase → MySQL + Docker
+# Migration Plan: Supabase → SQLite + Express + Node + Docker
 
-This is a **large refactor**. The current app uses Supabase for: database (Postgres + RLS), auth (JWT), and storage (3 buckets). MySQL has none of these built-in, so we replace each piece with a custom backend layer running inside TanStack Start server functions.
+Replace the Supabase backend with a separate **Express + Node.js** API server backed by **SQLite** (file-based, zero-config), keep the existing TanStack Start frontend, and ship both via Docker for production.
 
 ---
 
-## Part 1 — Files & Places That Need Changes
+## Architecture
 
-### A. Files to DELETE (Supabase-specific)
-```
-src/integrations/supabase/client.ts
-src/integrations/supabase/client.server.ts
-src/integrations/supabase/auth-middleware.ts
-src/integrations/supabase/types.ts
-supabase/                          (entire folder: config.toml + migrations)
+```text
+┌────────────────────────┐        ┌──────────────────────────┐
+│  Frontend (TanStack)   │  HTTP  │  Express API (Node 20)   │
+│  Vite build → Nginx    │ ─────> │  /api/auth, /api/...     │
+│  Container: web        │        │  Container: api          │
+└────────────────────────┘        │  ├─ better-sqlite3       │
+                                  │  ├─ bcryptjs + JWT       │
+                                  │  └─ multer (uploads)     │
+                                  └────────────┬─────────────┘
+                                               │
+                                  ┌────────────┴─────────────┐
+                                  │  Volumes (persistent)    │
+                                  │  ├─ /data/app.db (SQLite)│
+                                  │  └─ /data/uploads        │
+                                  └──────────────────────────┘
 ```
 
-### B. Files to REPLACE (auth + data layer)
+Two containers behind one network. SQLite + uploads live on a named Docker volume so data survives restarts/redeploys.
+
+---
+
+## Part 1 — Backend (new `server/` folder at project root)
+
+```
+server/
+├── package.json              # separate from frontend; only API deps
+├── tsconfig.json
+├── src/
+│   ├── index.ts              # express app, CORS, JSON, cookie-parser, routes mount
+│   ├── db.ts                 # better-sqlite3 connection + migration runner
+│   ├── schema.sql            # SQLite translation of current Postgres schema
+│   ├── auth/
+│   │   ├── jwt.ts            # sign/verify JWT, httpOnly cookie helpers
+│   │   ├── hash.ts           # bcryptjs wrappers
+│   │   └── middleware.ts     # requireAuth, requireRole(['admin'])
+│   ├── routes/
+│   │   ├── auth.routes.ts        # POST /signup /login /logout, GET /me
+│   │   ├── students.routes.ts
+│   │   ├── academic.routes.ts
+│   │   ├── subjects.routes.ts
+│   │   ├── users.routes.ts
+│   │   ├── announcements.routes.ts
+│   │   ├── attendance.routes.ts
+│   │   ├── finance.routes.ts
+│   │   ├── exams.routes.ts
+│   │   ├── expenses.routes.ts
+│   │   ├── payroll.routes.ts
+│   │   ├── transport.routes.ts
+│   │   ├── settings.routes.ts
+│   │   ├── results.routes.ts     # public results lookup
+│   │   └── upload.routes.ts      # multer → /data/uploads/{bucket}/...
+│   └── lib/
+│       ├── permissions.ts        # mirrors src/lib/permissions.ts (server-side)
+│       └── validators.ts         # zod schemas per route
+└── Dockerfile
+```
+
+**Dependencies:** `express`, `better-sqlite3`, `bcryptjs`, `jsonwebtoken`, `cookie-parser`, `cors`, `multer`, `zod`, `helmet`, `compression`, `morgan`, `dotenv` + `@types/*`.
+
+**Key choices:**
+- **better-sqlite3** (synchronous, fastest, battle-tested) over `sqlite3`.
+- **WAL mode** enabled at boot for concurrent reads.
+- **httpOnly + Secure + SameSite=Lax cookie** holds the JWT.
+- **First-signup-is-admin** logic in the signup handler (mirrors current behavior).
+- **No RLS** — every route handler calls `requireRole(...)` before queries.
+- **Triggers re-implemented in JS:** student-code generation, attendance future-date guard.
+- **Schema translation:** UUIDs → `TEXT` (generated with `crypto.randomUUID()`), enums → `TEXT CHECK(... IN (...))`, `JSON` columns stored as `TEXT` and parsed in app code, timestamps as ISO strings.
+
+---
+
+## Part 2 — Frontend changes
+
+Keep TanStack Start, but strip all Supabase usage.
+
+### Files to DELETE
+```
+src/integrations/supabase/         (entire folder)
+supabase/                          (entire folder)
+.env  (Supabase vars)
+```
+
+### Files to REPLACE
 | File | Change |
 |---|---|
-| `src/hooks/useAuth.tsx` | Drop `supabase.auth.*`. Use a new `/api/auth/*` fetch-based session (httpOnly cookie). |
-| `src/routes/login.tsx` | Replace `supabase.auth.signInWithPassword` with `POST /api/auth/login`. |
-| `src/routes/signup.tsx` | Replace `supabase.auth.signUp` with `POST /api/auth/signup`. Remove Google references (none present — good). |
-| `.env` | Remove `VITE_SUPABASE_*`. Add `DATABASE_URL`, `JWT_SECRET`, `UPLOAD_DIR`. |
+| `src/lib/api.ts` (NEW) | Thin `fetch` wrapper: `api.get/post/put/delete`, sends `credentials: 'include'`, base URL from `VITE_API_URL`. |
+| `src/hooks/useAuth.tsx` | `signIn` → `POST /api/auth/login`; `signOut` → `POST /api/auth/logout`; on mount → `GET /api/auth/me`. Drop Supabase listeners. |
+| `src/routes/login.tsx` | Use `api.post('/auth/login', ...)`. |
+| `src/routes/signup.tsx` | Use `api.post('/auth/signup', ...)`. Already email/password. |
+| `src/components/AppLayout.tsx` | No change needed once `useAuth` is updated. |
 
-### C. Every route file that imports `supabase` — rewrite data calls
-All ~15 files do `import { supabase } from "@/integrations/supabase/client"` and call `.from("table").select/insert/update/delete`. Each needs to call new server functions instead:
+### Every `_app/*.tsx` route + `results.tsx`
+Replace each `supabase.from('table').select/insert/update/delete` with `api.get/post/put/delete('/table', ...)`. Mechanical 1:1 swap. Replace `supabase.storage.from(bucket).upload(...)` with `FormData` POST to `/api/upload`.
 
-```
-src/routes/_app/dashboard.tsx
-src/routes/_app/students.tsx
-src/routes/_app/academic.tsx
-src/routes/_app/subjects.tsx
-src/routes/_app/users.tsx
-src/routes/_app/announcements.tsx
-src/routes/_app/attendance.tsx
-src/routes/_app/finance.tsx
-src/routes/_app/exams.tsx
-src/routes/_app/expenses.tsx
-src/routes/_app/payroll.tsx
-src/routes/_app/transport.tsx
-src/routes/_app/publish.tsx
-src/routes/_app/settings.tsx
-src/routes/results.tsx
-src/components/AppLayout.tsx       (signOut)
-```
+### Realtime
+Dashboard + announcements switch from `supabase.channel(...)` to `useQuery({ refetchInterval: 10_000 })`.
 
-Two approaches — pick one:
-- **Server functions** (`createServerFn`) per resource: `src/server/students.functions.ts`, etc. Component code calls them like `await listStudents()`. Type-safe, RPC-style.
-- **REST endpoints** under `src/routes/api/` that the client calls with `fetch`. Simpler if you want to consume from non-React clients later.
-
-Plan recommends **server functions** to minimise component changes.
-
-### D. NEW files to create
-
-**Database layer**
-```
-src/server/db.server.ts             // mysql2/promise pool from DATABASE_URL
-src/server/schema.sql               // full MySQL schema (translated from Postgres)
-src/server/seed.sql                 // optional initial data
-```
-
-**Auth layer (replaces Supabase Auth)**
-```
-src/server/auth.server.ts           // bcrypt hashing, JWT sign/verify, session cookie
-src/server/auth-middleware.ts       // createMiddleware: parse cookie → user + roles
-src/routes/api/auth/login.ts        // POST email+password → set httpOnly cookie
-src/routes/api/auth/signup.ts       // POST → create user (first = admin, rest disabled)
-src/routes/api/auth/logout.ts       // POST → clear cookie
-src/routes/api/auth/me.ts           // GET → current user + profile + roles
-```
-
-**Storage layer (replaces Supabase Storage)**
-```
-src/routes/api/upload.ts            // POST multipart → save to /app/uploads/{bucket}/...
-src/routes/api/files/$.ts           // GET → stream file from /app/uploads
-```
-Buckets to support: `avatars`, `school-assets`, `student-photos`. Store relative paths in DB; serve via `/api/files/{bucket}/{filename}`.
-
-**Permissions (replaces RLS)**
-RLS lives in Postgres; MySQL has no equivalent. Every server function must call `requireRole(user, ["admin","sub_admin"])` etc. before reading/writing. The existing `src/lib/permissions.ts` stays and is used **server-side** now (currently it is only client-side gating, which is not security).
-
-### E. Schema translation notes (Postgres → MySQL)
-- `uuid` → `CHAR(36)` with default `(UUID())` or generate in app code.
-- `gen_random_uuid()` → app-side `crypto.randomUUID()` or MySQL `UUID()`.
-- `text` → `TEXT` / `VARCHAR(255)` where indexed.
-- `timestamp with time zone` → `DATETIME(3)` (UTC convention) or `TIMESTAMP`.
-- `boolean` → `TINYINT(1)`.
-- `numeric` → `DECIMAL(12,2)`.
-- `ARRAY` (e.g. `non_school_weekdays int[]`) → `JSON`.
-- `USER-DEFINED` enums (`app_role`, attendance shifts, exam term/kind) → MySQL `ENUM(...)`.
-- All RLS policies → **dropped**; replaced by server-side checks.
-- DB functions (`has_role`, `is_admin`, `handle_new_user`, `generate_student_code`, `check_attendance_date`) → re-implement in `src/server/auth.server.ts` and resource modules.
-- Triggers (auto-create profile on signup, generate student code, block future-dated attendance) → re-implement in the signup endpoint and `students` / `attendance` server functions.
-
-### F. Realtime
-Current code uses Supabase Realtime in dashboard/announcements. MySQL has no realtime. Options:
-1. Replace with simple polling (`useQuery` + `refetchInterval`). Recommended for simplicity.
-2. Add a websocket layer later. Out of scope for this plan.
+### Build
+- Drop Cloudflare Worker target from `vite.config.ts` and remove `wrangler.jsonc`.
+- Frontend builds to static assets served by **Nginx** in the `web` container.
+- `VITE_API_URL` baked at build time (defaults to `/api` so Nginx proxies same-origin).
 
 ---
 
-## Part 2 — Docker Setup
+## Part 3 — Docker (production ready)
 
-### Files to create at project root
+### Files at project root
 ```
-Dockerfile
-docker-compose.yml
+Dockerfile.web          # multi-stage: bun build → nginx:alpine
+Dockerfile.api          # multi-stage: node 20 build → node 20-alpine runtime
+docker-compose.yml      # web + api + named volume for /data
+nginx.conf              # serves SPA, proxies /api → api:4000, gzip, caching
 .dockerignore
 .env.example
 ```
 
 ### `docker-compose.yml` (services)
-- **mysql** — `mysql:8.4`, named volume `mysql_data`, port `3306`, env `MYSQL_DATABASE=school`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD`. Mount `src/server/schema.sql` to `/docker-entrypoint-initdb.d/` for auto-init.
-- **app** — built from `Dockerfile`, depends_on mysql (healthcheck), exposes `3000`, env `DATABASE_URL=mysql://user:pass@mysql:3306/school`, `JWT_SECRET`, `UPLOAD_DIR=/app/uploads`. Named volume `uploads_data` mounted at `/app/uploads`.
-- **adminer** *(optional)* — DB UI on port `8080`.
+- **api** — built from `Dockerfile.api`, exposes `4000` (internal), env: `JWT_SECRET`, `DATABASE_PATH=/data/app.db`, `UPLOAD_DIR=/data/uploads`, `NODE_ENV=production`. Volume `app_data:/data`. Restart `unless-stopped`. Healthcheck on `/api/health`.
+- **web** — built from `Dockerfile.web`, exposes `80` → host `3000`. Nginx serves static SPA and proxies `/api/*` to `api:4000`. Depends on `api` healthy.
 
-### `Dockerfile` (multi-stage)
-1. **deps** — `oven/bun:1` → copy `package.json`, `bun.lockb` → `bun install --frozen-lockfile`.
-2. **build** — copy source → `bun run build` (TanStack Start production build).
-3. **runtime** — `node:20-alpine` (or `oven/bun:1-slim`) → copy `.output` (or build artifacts) → `EXPOSE 3000` → `CMD ["node", ".output/server/index.mjs"]` (exact path depends on TanStack Start build output; verify after first build).
+No DB container — SQLite is just a file in the `app_data` volume.
 
-### `.dockerignore`
-```
-node_modules
-.output
-.vinxi
-dist
-.git
-.env
-*.log
-```
+### Production hardening included
+- `helmet` + strict CORS on API
+- Rate limiting on `/api/auth/*` (`express-rate-limit`)
+- httpOnly+Secure+SameSite cookies, `JWT_SECRET` from env (min 32 chars)
+- Non-root user in both Dockerfiles
+- Multi-stage builds → small final images
+- SQLite WAL + automatic on-startup migrations
+- Daily backup script (`scripts/backup.sh`) that copies `app.db` to `/data/backups/` (cron-friendly)
+- Nginx: gzip, long cache for hashed assets, no-cache for `index.html`
+- Logging via `morgan` → stdout (Docker collects)
+- Graceful shutdown (SIGTERM → close server → close DB)
 
 ### Local run
 ```bash
-cp .env.example .env       # edit secrets
-docker compose up --build
-# app: http://localhost:3000
-# adminer: http://localhost:8080
+cp .env.example .env        # set JWT_SECRET
+docker compose up --build   # → http://localhost:3000
 ```
 
 ---
 
-## Part 3 — Dependencies
+## Part 4 — Caveats
 
-Add: `mysql2`, `bcryptjs`, `jsonwebtoken`, `cookie`, `zod` (already present?), `@types/bcryptjs`, `@types/jsonwebtoken`, `@types/cookie`.
-Remove: `@supabase/supabase-js`.
-
----
-
-## Part 4 — Caveats / Things You Should Know
-
-1. **No RLS safety net.** With Supabase, even a buggy frontend couldn't bypass row security. With MySQL, every server function MUST validate the caller. I'll add `requireAdmin` / `requireAdminOrSub` / `requireEnabled` helpers and use them everywhere.
-2. **File storage is local disk** (`/app/uploads` volume). Fine for local Docker; for production you'd swap to S3/R2.
-3. **No realtime.** Dashboard/announcements switch to polling.
-4. **Cloudflare Worker target removed.** Docker runs Node, so we drop the Worker-specific Vite config concerns. `vite.config.ts` may need `target: "node"` adjustment.
-5. **Email verification / password reset** — Supabase handled these. Out of scope unless you want me to wire up SMTP (nodemailer) too. Currently signup just creates a disabled account that admin approves.
-6. **Migration of existing data** — none assumed; you'll start with an empty MySQL DB. If you have existing Supabase data to export, that's a separate task.
-7. **Heavy rewrite scope.** ~16 route files + new server layer + schema + Docker = big diff. I'll do it in one shot but it's a lot of mechanical change.
+1. **SQLite single-writer** — fine for one app instance. Do not horizontally scale the `api` service; scale vertically. For multi-instance, switch to Postgres (the route layer is designed to make that swap easy).
+2. **No RLS safety net** — every route handler must call role checks. Plan adds a `requireRole` middleware applied per route.
+3. **File storage on local volume** — works for single-host deploys. Swap multer storage for S3/R2 if you go multi-host.
+4. **No realtime** — polling only.
+5. **No password reset / email verification** out of scope unless you want SMTP wired up too (say the word and I'll add nodemailer).
+6. **Heavy mechanical rewrite** — ~16 frontend route files + a new Express server. I'll do it in one pass.
 
 ---
 
 ## Execution order (when you approve)
 
-1. Add deps, write `.env.example`, `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
-2. Write MySQL `schema.sql` + `db.server.ts` connection pool.
-3. Write auth server (`auth.server.ts`, middleware, `/api/auth/*` routes).
-4. Write storage routes (`/api/upload`, `/api/files/$`).
-5. Write per-resource server functions (students, academic, finance, attendance, exams, expenses, payroll, transport, users, announcements, settings, results).
-6. Rewrite `useAuth`, `login`, `signup`, `AppLayout` signOut.
-7. Rewrite each `_app/*.tsx` route to call server functions instead of `supabase`.
-8. Delete `src/integrations/supabase/*` and `supabase/` folder.
-9. Verify `docker compose up --build` boots clean.
+1. Scaffold `server/` (package.json, tsconfig, Dockerfile, schema.sql, db.ts, index.ts).
+2. Implement auth routes + middleware + JWT/bcrypt helpers.
+3. Implement per-resource Express routes with role checks + zod validation.
+4. Implement `/api/upload` (multer) and static serving of uploaded files.
+5. Add `src/lib/api.ts` on the frontend; rewrite `useAuth`, `login`, `signup`.
+6. Rewrite each `_app/*.tsx` and `results.tsx` to use `api.*` instead of `supabase`.
+7. Swap realtime calls for polling.
+8. Delete `src/integrations/supabase/`, `supabase/`, drop CF Worker config.
+9. Write `Dockerfile.web`, `Dockerfile.api`, `nginx.conf`, `docker-compose.yml`, `.dockerignore`, `.env.example`, `scripts/backup.sh`.
+10. Verify `docker compose up --build` boots clean and signup → login → CRUD works end-to-end.
 
-Reply **approve** to proceed, or tell me what to change (e.g. "use REST not server functions", "add nodemailer for password reset", "use Postgres in Docker instead of MySQL", "skip Docker", "only do the Docker part now").
+Reply **approve** to proceed, or tell me what to change (e.g. "add nodemailer for password reset", "use Postgres instead of SQLite", "single Dockerfile not two", "skip Nginx, serve frontend from Express").
