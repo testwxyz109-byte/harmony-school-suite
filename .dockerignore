@@ -16,3 +16,7 @@ build
 supabase
 README.md
 MIGRATION.md
+server/node_modules
+server/dist
+server/data
+data

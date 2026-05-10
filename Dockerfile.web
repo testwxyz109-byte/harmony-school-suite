@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1.7
+# ---------- Stage 1: build the SPA with Bun ----------
+FROM oven/bun:1 AS build
+WORKDIR /app
+COPY package.json bun.lockb* ./
+RUN bun install --frozen-lockfile || bun install
+COPY . .
+# Frontend talks to /api on the same origin (Nginx proxies it).
+ENV VITE_API_URL=/api
+RUN bun run build
+
+# ---------- Stage 2: serve static SPA via Nginx ----------
+FROM nginx:alpine AS runtime
+RUN rm -rf /usr/share/nginx/html/*
+# TanStack Start (Node target) emits a public/static dir. We copy the
+# generated SPA assets. If the build outputs to .output/public, that's used;
+# fall back to dist/ for safety.
+COPY --from=build /app/.output/public /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD wget -q --spider http://127.0.0.1/ || exit 1
+CMD ["nginx", "-g", "daemon off;"]
