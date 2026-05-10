@@ -1,19 +1,17 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 import { Btn } from "@/components/PrimaryButton";
 import { Field, TextInput } from "@/components/FormField";
 import { useAuth } from "@/hooks/useAuth";
 import { Toaster, toast } from "sonner";
 import { GraduationCap } from "lucide-react";
 
-export const Route = createFileRoute("/login")({
-  component: LoginPage,
-});
+export const Route = createFileRoute("/login")({ component: LoginPage });
 
 function LoginPage() {
   const navigate = useNavigate();
-  const { user, loading } = useAuth();
+  const { user, loading, refreshProfile } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -24,17 +22,12 @@ function LoginPage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) {
-      toast.error("Please enter email and password");
-      return;
-    }
+    if (!email || !password) { toast.error("Please enter email and password"); return; }
     setSubmitting(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const r = await api.post("/auth/login", { email, password });
     setSubmitting(false);
-    if (error) {
-      toast.error(error.message);
-      return;
-    }
+    if (r.error) { toast.error(r.error.message); return; }
+    await refreshProfile();
     toast.success("Signed in");
     navigate({ to: "/" });
   };

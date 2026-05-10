@@ -19,15 +19,16 @@ interface QueryState {
   publicRead?: boolean;
 }
 
-type Result<T> = { data: T | null; error: { message: string } | null; count: number | null };
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Result = { data: any; error: any; count: any };
 
 function makeBuilder(initial: QueryState, op: "select" | "insert" | "update" | "delete", values?: unknown) {
   const state: QueryState = { ...initial };
-  let opVal = op;
-  let valuesArg: unknown = values;
+  const opVal = op;
+  const valuesArg: unknown = values;
   let single: "single" | "maybeSingle" | null = null;
 
-  const exec = async (): Promise<Result<unknown>> => {
+  const exec = async (): Promise<Result> => {
     const body: Record<string, unknown> = {
       table: state.table,
       op: opVal,
@@ -45,7 +46,7 @@ function makeBuilder(initial: QueryState, op: "select" | "insert" | "update" | "
       if (state.count) body.count = state.count;
     }
     const r = await query(body, { publicRead: state.publicRead });
-    return { data: r.data as unknown, error: r.error, count: r.count };
+    return { data: r.data, error: r.error, count: r.count };
   };
 
   const builder: Record<string, unknown> = {
@@ -77,11 +78,11 @@ function makeBuilder(initial: QueryState, op: "select" | "insert" | "update" | "
       if (opts?.head) state.head = opts.head;
       return builder;
     },
-    then: (resolve: (v: Result<unknown>) => unknown, reject?: (e: unknown) => unknown) =>
+    then: (resolve: (v: Result) => unknown, reject?: (e: unknown) => unknown) =>
       exec().then(resolve, reject),
     catch: (reject: (e: unknown) => unknown) => exec().catch(reject),
   };
-  return builder;
+  return builder as unknown as PromiseLike<Result> & Record<string, (...args: any[]) => any>;
 }
 
 function fromTable(table: string, opts?: { publicRead?: boolean }) {
@@ -97,18 +98,15 @@ function fromTable(table: string, opts?: { publicRead?: boolean }) {
   };
   return {
     select: (cols?: string, selOpts?: { count?: "exact"; head?: boolean }) => {
-      const b = makeBuilder(initial, "select");
-      const fn = (b as { select: (c?: string, o?: { count?: "exact"; head?: boolean }) => unknown }).select;
-      return fn(cols, selOpts);
+      const b = makeBuilder(initial, "select") as any;
+      return b.select(cols, selOpts);
     },
     insert: (values: unknown, _opts?: { count?: "exact" }) =>
       makeBuilder(initial, "insert", values),
-    update: (values: unknown, opts?: { count?: "exact" }) => {
-      const b = makeBuilder({ ...initial, count: opts?.count ?? null }, "update", values);
-      return b;
-    },
+    update: (values: unknown, opts?: { count?: "exact" }) =>
+      makeBuilder({ ...initial, count: opts?.count ?? null }, "update", values),
     delete: () => makeBuilder(initial, "delete"),
-    upsert: (values: unknown) => makeBuilder(initial, "insert", values), // simplified: relies on UNIQUE constraint
+    upsert: (values: unknown) => makeBuilder(initial, "insert", values),
   };
 }
 

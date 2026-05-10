@@ -1,19 +1,19 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 import { Btn } from "@/components/PrimaryButton";
 import { Field, TextInput } from "@/components/FormField";
+import { useAuth } from "@/hooks/useAuth";
 import { Toaster, toast } from "sonner";
 import { GraduationCap } from "lucide-react";
 
-export const Route = createFileRoute("/signup")({
-  component: SignupPage,
-});
+export const Route = createFileRoute("/signup")({ component: SignupPage });
 
 const PWD_RE = /^(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).{8,}$/;
 
 function SignupPage() {
   const navigate = useNavigate();
+  const { refreshProfile } = useAuth();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -27,21 +27,19 @@ function SignupPage() {
     if (!PWD_RE.test(password)) return toast.error("Password must be 8+ characters and include a special character");
     if (password !== confirm) return toast.error("Passwords do not match");
     setSubmitting(true);
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: window.location.origin,
-        data: { full_name: fullName },
-      },
+    const r = await api.post<{ ok: true; autoApproved: boolean }>("/auth/signup", {
+      email, password, full_name: fullName,
     });
     setSubmitting(false);
-    if (error) {
-      toast.error(error.message);
-      return;
+    if (r.error) return toast.error(r.error.message);
+    if (r.data?.autoApproved) {
+      await refreshProfile();
+      toast.success("Welcome! You're the first user — signed in as admin.");
+      navigate({ to: "/" });
+    } else {
+      toast.success("Account created. Awaiting admin approval.");
+      navigate({ to: "/login" });
     }
-    toast.success("Account created. Awaiting admin approval.");
-    navigate({ to: "/login" });
   };
 
   return (
