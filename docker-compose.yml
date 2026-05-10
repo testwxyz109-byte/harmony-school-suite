@@ -1,54 +1,43 @@
 services:
-  mysql:
-    image: mysql:8.4
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
     restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootsecret}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-school}
-      MYSQL_USER: ${MYSQL_USER:-school}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-schoolsecret}
-    command: --default-authentication-plugin=caching_sha2_password
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-      # Auto-import schema on first start:
-      - ./src/server/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootsecret}"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
-  app:
-    build: .
-    restart: unless-stopped
-    depends_on:
-      mysql:
-        condition: service_healthy
     environment:
       NODE_ENV: production
-      PORT: 3000
+      PORT: 4000
       HOST: 0.0.0.0
-      DATABASE_URL: mysql://${MYSQL_USER:-school}:${MYSQL_PASSWORD:-schoolsecret}@mysql:3306/${MYSQL_DATABASE:-school}
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      UPLOAD_DIR: /app/uploads
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
-    ports:
-      - "3000:3000"
+      DATABASE_PATH: /data/app.db
+      UPLOAD_DIR: /data/uploads
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (>=32 chars)}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
     volumes:
-      - uploads_data:/app/uploads
+      - app_data:/data
+    expose:
+      - "4000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  adminer:
-    image: adminer:latest
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
     restart: unless-stopped
     depends_on:
-      - mysql
+      api:
+        condition: service_healthy
     ports:
-      - "8080:8080"
-    environment:
-      ADMINER_DEFAULT_SERVER: mysql
+      - "${WEB_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
-  mysql_data:
-  uploads_data:
+  app_data:
